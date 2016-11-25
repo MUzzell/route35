@@ -1,0 +1,12 @@
+{
+    "Name": "home.",
+    "Port": 53,
+    "Secret": "secret",
+    "Records": {
+        "router": {"Address": "10.0.0.1", "TTL": 10}
+    },
+    "Nameservers": [
+        {"Address": "8.8.8.8:53", "Timeout": "500ms"},
+        {"Address": "4.4.4.4:53", "Timeout": "500ms"}
+    ]
+}
