@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"os"
 
 	"fmt"
 
@@ -27,7 +28,7 @@ func MustReadFile(path string) []byte {
 
 // MustGetAddress returns the IPv4 address for an interface or panics
 func MustGetAddress(interfaceName string) net.IP {
-	iface, err := net.InterfaceByName("en0")
+	iface, err := net.InterfaceByName(interfaceName)
 
 	if err == nil {
 		if addrs, err := iface.Addrs(); err == nil {
@@ -60,7 +61,7 @@ func MustRR(template string) dns.RR {
 }
 
 // Host contains the external interface address to bind to
-var Host = MustGetAddress("en0").To4().String()
+var Host = MustGetAddress("eth0").To4().String()
 
 // WriteError puts a server failure message on the response
 func WriteError(response dns.ResponseWriter, request *dns.Msg) {
@@ -266,7 +267,9 @@ func (config *Config) CheckSecret() gin.HandlerFunc {
 func main() {
 	var config Config
 
-	if err := json.Unmarshal(MustReadFile("config.json"), &config); err != nil {
+	configFile := os.Args[1]
+
+	if err := json.Unmarshal(MustReadFile(configFile), &config); err != nil {
 		log.Fatalln(err)
 	}
 
