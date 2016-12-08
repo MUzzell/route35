@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -17,13 +16,45 @@ import (
 	"github.com/miekg/dns"
 )
 
-// MustReadFile returns the contents of a file or panics
-func MustReadFile(path string) []byte {
-	data, err := ioutil.ReadFile(path)
-	if err != nil {
-		log.Fatalln(err)
+// Record contains a single DNS entry
+type Record struct {
+	Address string
+	TTL     int
+}
+
+// NamedRecord contains a DNS entry and its name
+type NamedRecord struct {
+	Record
+	Name string
+}
+
+// Transport is either the string "tcp" or "udp"
+type Transport string
+
+// Duration can be JSON parsed
+type Duration time.Duration
+
+// Nameserver will respond if we do not know an entry
+type Nameserver struct {
+	Address   string
+	Timeout   Duration
+	Transport Transport
+}
+
+// UnmarshalJSON parses a transport string
+func (e *Transport) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
 	}
-	return data
+	if s == "" {
+		*e = "tcp"
+	} else if s == "tcp" || s == "udp" {
+		*e = Transport(s)
+	} else {
+		return fmt.Errorf("Illegal value for transport %q", s)
+	}
+	return nil
 }
 
 // MustGetAddress returns the IPv4 address for an interface or panics
@@ -59,9 +90,6 @@ func MustRR(template string) dns.RR {
 	}
 	return value
 }
-
-// Host contains the external interface address to bind to
-var Host = MustGetAddress("eth0").To4().String()
 
 // WriteError puts a server failure message on the response
 func WriteError(response dns.ResponseWriter, request *dns.Msg) {
@@ -112,6 +140,7 @@ func (config *Config) RequestHandler(response dns.ResponseWriter, request *dns.M
 	var unknown []dns.Question
 
 	for _, question := range request.Question {
+
 		key := strings.TrimSuffix(question.Name, fmt.Sprintf(".%s", config.Name))
 
 		record := config.Records[key]
@@ -131,7 +160,7 @@ func (config *Config) RequestHandler(response dns.ResponseWriter, request *dns.M
 	message.Answer = answers
 
 	message.Ns = []dns.RR{
-		MustRR(fmt.Sprintf("%s 3600 IN NS %s.", config.Name, Host)),
+		MustRR(fmt.Sprintf("%s 3600 IN NS %s.", config.Name, config.ListenHost)),
 	}
 
 	message.Authoritative = true
@@ -140,40 +169,6 @@ func (config *Config) RequestHandler(response dns.ResponseWriter, request *dns.M
 
 	response.WriteMsg(message)
 }
-
-// Record contains a single DNS entry
-type Record struct {
-	Address string
-	TTL     int
-}
-
-// NamedRecord contains a DNS entry and its name
-type NamedRecord struct {
-	Record
-	Name string
-}
-
-// Transport is either the string "tcp" or "udp"
-type Transport string
-
-// UnmarshalJSON parses a transport string
-func (e *Transport) UnmarshalJSON(b []byte) error {
-	var s string
-	if err := json.Unmarshal(b, &s); err != nil {
-		return err
-	}
-	if s == "" {
-		*e = "tcp"
-	} else if s == "tcp" || s == "udp" {
-		*e = Transport(s)
-	} else {
-		return fmt.Errorf("Illegal value for transport %q", s)
-	}
-	return nil
-}
-
-// Duration can be JSON parsed
-type Duration time.Duration
 
 // UnmarshalJSON parses a string into a time.Duration
 func (e *Duration) UnmarshalJSON(b []byte) error {
@@ -189,28 +184,12 @@ func (e *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// Nameserver will respond if we do not know an entry
-type Nameserver struct {
-	Address   string
-	Timeout   Duration
-	Transport Transport
-}
-
 // Client creates a DNS client to a nameserver
 func (nameserver *Nameserver) Client() *dns.Client {
 	return &dns.Client{
 		Net:     string(nameserver.Transport),
 		Timeout: time.Duration(nameserver.Timeout),
 	}
-}
-
-// Config contains global server configuration
-type Config struct {
-	Port        int
-	Name        string
-	Secret      string
-	Records     map[string]*Record
-	Nameservers []Nameserver
 }
 
 // Resolve a list of questions
@@ -265,15 +244,11 @@ func (config *Config) CheckSecret() gin.HandlerFunc {
 }
 
 func main() {
-	var config Config
-
 	configFile := os.Args[1]
 
-	if err := json.Unmarshal(MustReadFile(configFile), &config); err != nil {
-		log.Fatalln(err)
-	}
+	config := MustParseConfig(configFile)
 
-	ip := fmt.Sprintf("%s:%d", Host, config.Port)
+	ip := fmt.Sprintf("%s:%d", config.ListenHost, config.Port)
 
 	log.Println(fmt.Sprintf("DNS on %s", ip))
 
