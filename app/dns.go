@@ -13,29 +13,17 @@ import (
     "github.com/miekg/dns"
 )
 
-// Record contains a single DNS entry
-type Record struct {
-    Address string
-    TTL     int
+var TypeMap = map[uint16]string{
+    1: "A",
+    28: "AAAA",
 }
 
-// NamedRecord contains a DNS entry and its name
-type NamedRecord struct {
-    Record
-    Name string
-}
-
-// Transport is either the string "tcp" or "udp"
-type Transport string
-
-// Duration can be JSON parsed
-type Duration time.Duration
-
-// Nameserver will respond if we do not know an entry
-type Nameserver struct {
-    Address   string
-    Timeout   Duration
-    Transport Transport
+func GetQType(code uint16) string {
+    i, exists := TypeMap[code]
+    if exists {
+        return i
+    }
+    return "??"
 }
 
 // UnmarshalJSON parses a transport string
@@ -98,24 +86,51 @@ func WriteError(response dns.ResponseWriter, request *dns.Msg) {
     response.WriteMsg(message)
 }
 
+func (config *Config) ValidateQuery(client string, request *dns.Msg) (bool, error) {
+
+    for _, question := range request.Question {
+        for _, blocked := range config.Blocks {
+            // TODO; work with regex
+            if strings.Contains(question.Name, blocked) {
+                return false, nil
+            }
+        }
+    }
+    return true, nil
+
+}
+
 // RecurseHandler creates a handler that will query the next responding Nameserver
 func (config *Config) RecurseHandler(response dns.ResponseWriter, request *dns.Msg) {
-    questions := request.Question
+    client := response.RemoteAddr().String()
+
+    valid, err := config.ValidateQuery(client, request)
+
+    if err != nil {
+        log.Printf("RecurseHandler: error validating query; %v", err)
+        WriteError(response, request)
+    }
+
+    if !valid {
+        log.Printf("RecurseHandler: query blocked")
+        WriteError(response, request)
+    }
 
     for _, nameserver := range config.Nameservers {
         c := &dns.Client{Net: string(nameserver.Transport), Timeout: time.Duration(nameserver.Timeout)}
         var r *dns.Msg
-        var rtt time.Duration
         var err error
 
-        r, rtt, err = c.Exchange(request, nameserver.Address)
+        r, _, err = c.Exchange(request, nameserver.Address)
         if err == nil || err == dns.ErrTruncated {
             r.Compress = false
 
-            // Forward the response
-            log.Printf("RecurseHandler: recurse RTT for %v (%v)", questions, rtt)
             if err := response.WriteMsg(r); err != nil {
                 log.Printf("RecurseHandler: failed to respond: %v", err)
+                return
+            }
+            for _, question := range request.Question {
+                log.Printf("%s (%s? %s) => %s", client, GetQType(question.Qtype), question.Name, nameserver.Address)
             }
             return
         }
@@ -124,7 +139,7 @@ func (config *Config) RecurseHandler(response dns.ResponseWriter, request *dns.M
 
     // If all resolvers fail, return a SERVFAIL message
     log.Printf("RecurseHandler: all resolvers failed for %v from client %s (%s)",
-        questions, response.RemoteAddr().String(), response.RemoteAddr().Network())
+        request.Question, response.RemoteAddr().String(), response.RemoteAddr().Network())
 
     WriteError(response, request)
 }
@@ -140,12 +155,22 @@ func (config *Config) RequestHandler(response dns.ResponseWriter, request *dns.M
 
         key := strings.TrimSuffix(question.Name, fmt.Sprintf(".%s", config.Name))
 
+        record, exists := config.Records[key]
+
+        if exists {
+            answers = append(answers, MustRR(fmt.Sprintf("%s 5 IN A %s", question.Name, record)))
+        } else {
+            unknown = append(unknown, question)
+        }
+
+        /*
         record := config.Records[key]
         if record != nil {
             answers = append(answers, MustRR(fmt.Sprintf("%s %d IN A %s", question.Name, record.TTL, record.Address)))
         } else {
             unknown = append(unknown, question)
         }
+        */
     }
 
     if len(unknown) > 0 {

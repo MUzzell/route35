@@ -33,7 +33,7 @@ func BuildWeb(config *Config) *gin.Engine {
 		api.POST("/records", func(c *gin.Context) {
 			var json NamedRecord
 			if c.BindJSON(&json) == nil {
-				config.Records[json.Name] = &json.Record
+				config.Records[json.Name] = json.Record
 			}
 		})
 		// SHOW
@@ -42,9 +42,9 @@ func BuildWeb(config *Config) *gin.Engine {
 		})
 		// UPDATE
 		api.PUT("/records/:address", func(c *gin.Context) {
-			var json Record
+			var json string
 			if c.BindJSON(&json) == nil {
-				config.Records[c.Param("address")] = &json
+				config.Records[c.Param("address")] = json
 			}
 		})
 		// DESTROY

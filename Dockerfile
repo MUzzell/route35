@@ -2,7 +2,9 @@ FROM golang
 
 # Copy the local package files to the container's workspace.
 ADD app /go/src/route35
-ADD config.json /
+ADD test/config.json /
+ADD test/records /
+ADD test/blocks /
 
 RUN go get route35
 
