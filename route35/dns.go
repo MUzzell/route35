@@ -13,6 +13,10 @@ import (
     "github.com/miekg/dns"
 )
 
+type DnsHandler struct {
+    config Config
+}
+
 var TypeMap = map[uint16]string{
     1: "A",
     28: "AAAA",
@@ -23,23 +27,7 @@ func GetQType(code uint16) string {
     if exists {
         return i
     }
-    return "??"
-}
-
-// UnmarshalJSON parses a transport string
-func (e *Transport) UnmarshalJSON(b []byte) error {
-    var s string
-    if err := json.Unmarshal(b, &s); err != nil {
-        return err
-    }
-    if s == "" {
-        *e = "tcp"
-    } else if s == "tcp" || s == "udp" {
-        *e = Transport(s)
-    } else {
-        return fmt.Errorf("Illegal value for transport %q", s)
-    }
-    return nil
+    return fmt.Sprintf("?%d?", code)
 }
 
 // MustGetAddress returns the IPv4 address for an interface or panics
@@ -86,10 +74,10 @@ func WriteError(response dns.ResponseWriter, request *dns.Msg) {
     response.WriteMsg(message)
 }
 
-func (config *Config) ValidateQuery(client string, request *dns.Msg) (bool, error) {
+func (handler *DnsHandler) ValidateQuery(client string, request *dns.Msg) (bool, error) {
 
     for _, question := range request.Question {
-        for _, blocked := range config.Blocks {
+        for _, blocked := range handler.config.Blocks {
             // TODO; work with regex
             if strings.Contains(question.Name, blocked) {
                 return false, nil
@@ -101,10 +89,10 @@ func (config *Config) ValidateQuery(client string, request *dns.Msg) (bool, erro
 }
 
 // RecurseHandler creates a handler that will query the next responding Nameserver
-func (config *Config) RecurseHandler(response dns.ResponseWriter, request *dns.Msg) {
+func (handler *DnsHandler) RecurseHandler(response dns.ResponseWriter, request *dns.Msg) {
     client := response.RemoteAddr().String()
 
-    valid, err := config.ValidateQuery(client, request)
+    valid, err := handler.ValidateQuery(client, request)
 
     if err != nil {
         log.Printf("RecurseHandler: error validating query; %v", err)
@@ -116,7 +104,7 @@ func (config *Config) RecurseHandler(response dns.ResponseWriter, request *dns.M
         WriteError(response, request)
     }
 
-    for _, nameserver := range config.Nameservers {
+    for _, nameserver := range handler.config.Nameservers {
         c := &dns.Client{Net: string(nameserver.Transport), Timeout: time.Duration(nameserver.Timeout)}
         var r *dns.Msg
         var err error
@@ -130,7 +118,7 @@ func (config *Config) RecurseHandler(response dns.ResponseWriter, request *dns.M
                 return
             }
             for _, question := range request.Question {
-                log.Printf("%s (%s? %s) => %s", client, GetQType(question.Qtype), question.Name, nameserver.Address)
+                log.Printf("%s (%s? %s) => %s", client, GetQType(question.Qtype), question.Name, nameserver.Address, r.Answer)
             }
             return
         }
@@ -145,44 +133,36 @@ func (config *Config) RecurseHandler(response dns.ResponseWriter, request *dns.M
 }
 
 // RequestHandler returns a function that will look up entries in a Config
-func (config *Config) RequestHandler(response dns.ResponseWriter, request *dns.Msg) {
+func (handler *DnsHandler) RequestHandler(response dns.ResponseWriter, request *dns.Msg) {
     message := new(dns.Msg)
+    client := response.RemoteAddr().String()
 
     var answers []dns.RR
     var unknown []dns.Question
 
     for _, question := range request.Question {
-
-        key := strings.TrimSuffix(question.Name, fmt.Sprintf(".%s", config.Name))
-
-        record, exists := config.Records[key]
+        key := strings.TrimSuffix(question.Name, fmt.Sprintf(".%s", handler.config.Name))
+        record, exists := handler.config.Records[key]
 
         if exists {
+            log.Printf("%s (%s? %s) => %s", client, GetQType(question.Qtype), question.Name, record)
             answers = append(answers, MustRR(fmt.Sprintf("%s 5 IN A %s", question.Name, record)))
         } else {
+            log.Printf("%s (%s? %s) => ??", client, GetQType(question.Qtype), question.Name)
             unknown = append(unknown, question)
         }
-
-        /*
-        record := config.Records[key]
-        if record != nil {
-            answers = append(answers, MustRR(fmt.Sprintf("%s %d IN A %s", question.Name, record.TTL, record.Address)))
-        } else {
-            unknown = append(unknown, question)
-        }
-        */
     }
 
     if len(unknown) > 0 {
         log.Printf("Failed to resolve: %q, recursing.", unknown)
 
-        answers = append(answers, config.Resolve(unknown)...)
+        answers = append(answers, handler.Resolve(unknown)...)
     }
 
     message.Answer = answers
 
     message.Ns = []dns.RR{
-        MustRR(fmt.Sprintf("%s 3600 IN NS %s.", config.Name, config.ListenHost)),
+        MustRR(fmt.Sprintf("%s 3600 IN NS %s.", handler.config.Name, handler.config.ListenHost)),
     }
 
     message.Authoritative = true
@@ -215,7 +195,7 @@ func (nameserver *Nameserver) Client() *dns.Client {
 }
 
 // Resolve a list of questions
-func (config *Config) Resolve(questions []dns.Question) []dns.RR {
+func (handler *DnsHandler) Resolve(questions []dns.Question) []dns.RR {
     targets := make(map[string]dns.Question)
     var answers []dns.RR
 
@@ -223,7 +203,7 @@ func (config *Config) Resolve(questions []dns.Question) []dns.RR {
         targets[question.Name] = question
     }
 
-    for _, nameserver := range config.Nameservers {
+    for _, nameserver := range handler.config.Nameservers {
         if len(targets) == 0 {
             break
         }
@@ -254,9 +234,12 @@ func (config *Config) Resolve(questions []dns.Question) []dns.RR {
 }
 
 func MustStartDns(config *Config) {
-    ip := fmt.Sprintf("%s:%d", config.ListenHost, config.Port)
 
-    log.Println(fmt.Sprintf("DNS on %s", ip))
+    dnsHandler := DnsHandler { *config }
+
+    listenHost := fmt.Sprintf("%s:%d", dnsHandler.config.ListenHost, dnsHandler.config.Port)
+
+    log.Println(fmt.Sprintf("DNS on %s", listenHost))
 
     for _, protocol := range []string{"udp", "tcp"} {
         go func(server *dns.Server) {
@@ -264,9 +247,9 @@ func MustStartDns(config *Config) {
                 log.Fatalln(err)
             }
             log.Fatalln("DNS server crashed")
-        }(&dns.Server{Addr: ip, Net: protocol})
+        }(&dns.Server{Addr: listenHost, Net: protocol})
     }
 
-    dns.HandleFunc(config.Name, config.RequestHandler)
-    dns.HandleFunc(".", config.RecurseHandler)
+    dns.HandleFunc(config.Name, dnsHandler.RequestHandler)
+    dns.HandleFunc(".", dnsHandler.RecurseHandler)
 }
